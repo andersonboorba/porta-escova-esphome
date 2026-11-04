@@ -1,0 +1,1339 @@
+esphome:
+  name: porta-escova
+  friendly_name: Porta Escova
+  on_boot:
+      priority: -10
+      then:
+        # 1. Espera 1 segundo para a voltagem estabilizar após ligar na tomada
+        - delay: 1s
+        
+        # 2. Carrega o brilho do display
+        - lambda: |-
+            id(tm1637_display).set_intensity(id(cfg_brilho_disp));
+
+        # 3. Liga a Luz PRIMEIRO (para garantir visual)
+        
+        # 4. Pequena pausa para o LED processar o sinal
+        - delay: 200ms
+        
+        # 5. AGORA toca a música (assim não encavala com o LED)
+        - rtttl.play: "SMBTitle:d=4,o=5,b=125:8d7,8d7,8d7,8d6,8d7,8d7,8d7,8d6,2d#7,8d7,p"
+
+esp8266:
+  board: nodemcuv2
+
+logger:
+
+api:
+  encryption:
+    key: "-----------------------------------------" #coloque sua api usa secrets
+
+ota:
+  - platform: esphome
+    password: "----------------------------------------" #colooque sua senha ota usa secrets
+
+wifi:
+  networks:
+    - ssid: !secret wifi_ssid
+      password: !secret wifi_password
+    - ssid: !secret wifi_ssid2
+      password: !secret wifi_password2
+  min_auth_mode: WPA2
+  ap:
+    ssid: "Porta-Escova AP"
+    password: !secret wifi_ap_password
+
+captive_portal:
+
+web_server:
+  port: 80
+  version: 1
+  auth:
+    username: !secret web_server_username
+    password: !secret web_server_password  
+
+# ==================================================
+# VARIÁVEIS GLOBAIS
+# ==================================================
+globals:
+  # --- Controle Passo a Passo (NOVO) ---
+  - id: edit_step
+    type: int
+    initial_value: '0' # 0 = Hora, 1 = Minuto
+
+  # --- Controle do Feedback "SAVE" (NOVO) ---
+  - id: feedback_save_ativo
+    type: bool
+    initial_value: 'false'
+
+  # --- Controle do Menu ---
+  - id: menu_layer
+    type: int
+    initial_value: '0' 
+    # 0 = Ocioso (Relógio/Timer)
+    # 1 = Menu Principal
+    # 2 = Sub Menu
+    # 3 = Editando Valor
+  
+  - id: menu_main_idx
+    type: int
+    initial_value: '0' 
+  
+  - id: menu_sub_idx
+    type: int
+    initial_value: '0' 
+
+  # --- Configurações Alarme ---
+  - id: alarme_hh
+    type: int
+    restore_value: yes
+    initial_value: '7'
+  - id: alarme_mm
+    type: int
+    restore_value: yes
+    initial_value: '0'
+  - id: alarme_ativo_bool
+    type: bool
+    restore_value: yes
+    initial_value: 'false'
+  - id: alarme_som_idx
+    type: int
+    restore_value: yes
+    initial_value: '0' 
+
+  # --- Configurações Timer ---
+  - id: timer_preset_idx
+    type: int
+    restore_value: yes
+    initial_value: '2' 
+  - id: timer_som_idx
+    type: int
+    restore_value: yes
+    initial_value: '0' 
+
+  # --- Configurações Display/LED ---
+  - id: cfg_brilho_led
+    type: int
+    restore_value: yes
+    initial_value: '4' 
+  - id: cfg_brilho_disp
+    type: int
+    restore_value: yes
+    initial_value: '7' 
+  - id: cfg_modo_noturno
+    type: int
+    restore_value: yes
+    initial_value: '0' 
+
+  # --- Variáveis de Execução ---
+  - id: cronometro_ativo
+    type: bool
+    initial_value: 'false'
+  - id: segundos_restantes
+    type: int
+    initial_value: '0'
+  - id: fim_cronometro
+    type: bool
+    initial_value: 'false'
+  - id: temp_val
+    type: int
+    initial_value: '0' 
+  - id: temp_val_2
+    type: int
+    initial_value: '0' 
+
+  - id: mostrar_horario_alarme
+    type: bool
+    initial_value: 'false'
+
+  - id: alarme_efeito_idx
+    type: int
+    restore_value: yes
+    initial_value: '0' 
+  - id: timer_efeito_idx
+    type: int
+    restore_value: yes
+    initial_value: '0'
+
+  - id: ha_mode_ativo
+    type: bool
+    initial_value: 'false'
+    
+  - id: ha_loop_step
+    type: int
+    initial_value: '0'
+
+  - id: inicio_uso_escova
+    type: int
+    initial_value: '0'
+  - id: duracao_uso_escova
+    type: int
+    initial_value: '0'
+  - id: mostrar_feedback_uso
+    type: bool
+    initial_value: 'false'
+
+time:
+  - platform: homeassistant
+    id: hora_atual
+
+# ==================================================
+# DISPLAY TM1637
+# ==================================================
+display:
+  - platform: tm1637
+    id: tm1637_display
+    clk_pin: D1
+    dio_pin: D2
+    length: 4
+    update_interval: 250ms
+    lambda: |-
+      static int i = 0;
+      i++;
+      bool blink_slow = (i % 4) < 2;
+      bool blink_fast = (i % 2) == 0;
+
+      // Verifica Modo Noturno
+      auto now = id(hora_atual).now();
+      if (id(cfg_modo_noturno) == 1) { 
+         it.set_intensity(0);
+      } else if (id(cfg_modo_noturno) == 0 && now.is_valid()) {
+         if (now.hour >= 22 || now.hour < 6) it.set_intensity(0);
+         else it.set_intensity(id(cfg_brilho_disp));
+      } else {
+         it.set_intensity(id(cfg_brilho_disp));
+      }
+
+      // ----------------------------------------
+      // PRIORIDADE ABSOLUTA: MODO HOME ASSISTANT
+      // ----------------------------------------
+      if (id(ha_mode_ativo)) {
+         if (id(ha_loop_step) == 0) {
+            it.print("-HA-");
+         } 
+         else if (id(ha_loop_step) == 1) {
+            if (id(ha_temp_externa).has_state()) {
+               int temp = round(id(ha_temp_externa).state);
+               it.printf("t-%02d", temp);
+            } else {
+               it.print("t---");
+            }
+         }
+         else if (id(ha_loop_step) == 2) {
+            if (id(ha_umid_externa).has_state()) {
+               int umid = round(id(ha_umid_externa).state);
+               // Se for 100, mostra U100, se for menos, mostra U-90
+               if (umid >= 100) it.printf("U%d", umid);
+               else it.printf("U-%02d", umid);
+            } else {
+               it.print("U---");
+            }
+         }
+         return; // Sai daqui e não mostra mais nada (relógio, menu, etc)
+      }
+      
+      // ----------------------------------------
+      // PRIORIDADE 2: FEEDBACK DE USO (TEMPO DE ESCOVAÇÃO)
+      // ----------------------------------------
+      if (id(mostrar_feedback_uso)) {
+         int mm = id(duracao_uso_escova) / 60;
+         int ss = id(duracao_uso_escova) % 60;
+         // Mostra no formato Minutos.Segundos (ex: 02.15)
+         it.printf("%02d.%02d", mm, ss);
+         return;
+      }
+
+      // ----------------------------------------
+      // PRIORIDADE MÁXIMA: FEEDBACK "SAVE" (NOVO)
+      // ----------------------------------------
+      if (id(feedback_save_ativo)) {
+         it.print("SAVE");
+         return;
+      }
+
+      // 2. PRIORIDADE: VISUALIZAR ALARME (NOVO)
+      if (id(mostrar_horario_alarme)) {
+         // Mostra HH.MM do alarme fixo
+         it.printf("%02d.%02d", id(alarme_hh), id(alarme_mm));
+         return;
+      }
+      // ----------------------------------------
+      // CAMADA 0: OCIOSO
+      // ----------------------------------------
+      if (id(menu_layer) == 0) {
+        
+        if (!id(wifi_conectado).state) {
+           int anim = (i / 1) % 6; 
+           if (anim == 0) it.print("-   ");
+           if (anim == 1) it.print(" -  ");
+           if (anim == 2) it.print("  - ");
+           if (anim == 3) it.print("   -");
+           if (anim == 4) it.print("  - ");
+           if (anim == 5) it.print(" -  ");
+           return;
+        }
+
+        if (id(fim_cronometro)) {
+          if (blink_fast) it.print("0000");
+          else it.print("    ");
+          return;
+        }
+
+        if (id(cronometro_ativo)) {
+           int mm = id(segundos_restantes) / 60;
+           int ss = id(segundos_restantes) % 60;
+           if (blink_slow) it.printf("%02d.%02d", mm, ss);
+           else it.printf("%02d%02d", mm, ss);
+           return;
+        }
+
+        if (now.is_valid()) {
+          if (blink_slow) it.strftime("%H.%M", now);
+          else it.strftime("%H%M", now);
+        } else {
+          it.print("----");
+        }
+        return;
+      }
+
+      // ----------------------------------------
+      // CAMADA 1: MENU PRINCIPAL
+      // ----------------------------------------
+      if (id(menu_layer) == 1) {
+        if (id(menu_main_idx) == 0) it.print("ALAr");
+        if (id(menu_main_idx) == 1) it.print("CrOn");
+        if (id(menu_main_idx) == 2) it.print("COnF");
+        return;
+      }
+
+      // ----------------------------------------
+      // CAMADA 2: SUB MENUS
+      // ----------------------------------------
+      if (id(menu_layer) == 2) {
+        if (id(menu_main_idx) == 0) { // Alarme
+           if (id(menu_sub_idx) == 0) it.print("HorA");
+           if (id(menu_sub_idx) == 1) it.print("AtiV");
+           if (id(menu_sub_idx) == 2) it.print("AUDI");
+           if (id(menu_sub_idx) == 3) it.print("EfEi");
+        }
+        else if (id(menu_main_idx) == 1) { // Timer
+           if (id(menu_sub_idx) == 0) it.print("tEnP");
+           if (id(menu_sub_idx) == 1) it.print("AUDI");
+           if (id(menu_sub_idx) == 2) it.print("EfEi");
+        }
+        else if (id(menu_main_idx) == 2) { // Display
+           if (id(menu_sub_idx) == 0) it.print("LEd-");
+           if (id(menu_sub_idx) == 1) it.print("diSp");
+           if (id(menu_sub_idx) == 2) it.print("Noit");
+        }
+        return;
+      }
+
+      // ----------------------------------------
+      // CAMADA 3: EDITANDO VALORES
+      // ----------------------------------------
+      if (id(menu_layer) == 3) {
+        
+        // === EDITANDO ALARME ===
+        if (id(menu_main_idx) == 0) {
+           // Hora/Minuto
+           if (id(menu_sub_idx) == 0) { 
+              if (id(edit_step) == 0) {
+                 if (blink_fast) it.printf("  .%02d", id(temp_val_2));
+                 else it.printf("%02d.%02d", id(temp_val), id(temp_val_2));
+              } else {
+                 if (blink_fast) it.printf("%02d.  ", id(temp_val));
+                 else it.printf("%02d.%02d", id(temp_val), id(temp_val_2));
+              }
+           }
+           // Ativo
+           if (id(menu_sub_idx) == 1) {
+              if (id(temp_val) == 1) it.print("-ON-");
+              else it.print("OFF-");
+           }
+           // Som
+           if (id(menu_sub_idx) == 2) it.printf("So-%d", id(temp_val) + 1);
+           
+           // Efeito (AQUI FALTAVA O PONTO E VÍRGULA)
+           if (id(menu_sub_idx) == 3) it.printf("Ef-%d", id(temp_val) + 1);
+        }
+        
+        // === EDITANDO TIMER ===
+        if (id(menu_main_idx) == 1) {
+           // Tempo
+           if (id(menu_sub_idx) == 0) {
+              int minutos = 1 + (id(temp_val) / 2);
+              int trinta = (id(temp_val) % 2) * 30;
+              it.printf("%02d.%02d", minutos, trinta);
+           }
+           // Som
+           if (id(menu_sub_idx) == 1) it.printf("So-%d", id(temp_val) + 1);
+
+           // Efeito (CORRIGIDO TAMBÉM)
+           if (id(menu_sub_idx) == 2) it.printf("Ef-%d", id(temp_val) + 1);
+        }
+
+        // === CONFIGURAÇÕES ===
+        if (id(menu_main_idx) == 2) {
+           if (id(menu_sub_idx) == 0) {
+              if (id(temp_val) == 0) it.print("LOFF");
+              else if (id(temp_val) == 4) it.print("L100"); 
+              else it.printf("L-%d", id(temp_val) * 25);    
+           }
+           if (id(menu_sub_idx) == 1) {
+              if (id(temp_val) == 0) it.print("OFF-");
+              else it.printf("Lv-%d", id(temp_val));
+           }
+           if (id(menu_sub_idx) == 2) {
+              if (id(temp_val) == 0) it.print("Auto");
+              if (id(temp_val) == 1) it.print("-On-");
+              if (id(temp_val) == 2) it.print("OFF-");
+           }
+        }
+      }
+
+# ==================================================
+# LUZ RGB
+# ==================================================
+light:
+  - platform: neopixelbus
+    pin: D4
+    variant: WS2811
+    num_leds: 10
+    id: led_rgb
+    name: "Luz Porta Escova"
+    effects:
+      - addressable_rainbow:
+          name: "Arco Íris"
+      - addressable_scan:
+          name: "Scan"
+          move_interval: 100ms
+          scan_width: 1
+          
+      - addressable_fireworks:
+          name: "Fogos"
+
+      - addressable_twinkle:
+          name: "Cintilar"
+          twinkle_probability: 5%
+          progress_interval: 4ms
+
+      - addressable_random_twinkle:
+          name: "Cintilar Colorido"
+          twinkle_probability: 5%
+          progress_interval: 32ms
+
+      - strobe:
+          name: "Strobe Verde Amarelo Vermelho"
+          colors:
+            # VERDE
+            - state: true
+              brightness: 100%
+              red: 0%
+              green: 100%
+              blue: 0%
+              duration: 400ms
+
+            - state: false
+              duration: 150ms
+
+            # AMARELO
+            - state: true
+              brightness: 100%
+              red: 100%
+              green: 100%
+              blue: 0%
+              duration: 400ms
+
+            - state: false
+              duration: 150ms
+
+            # VERMELHO
+            - state: true
+              brightness: 100%
+              red: 100%
+              green: 0%
+              blue: 0%
+              duration: 400ms
+
+
+      - addressable_color_wipe:
+          name: Deslizar o Branco
+          colors:
+            - red: 100%
+              green: 100%
+              blue: 100%
+              num_leds: 5
+              gradient: true
+            - red: 0%
+              green: 0%
+              blue: 0%
+              num_leds: 1
+          add_led_interval: 100ms
+          reverse: false
+
+      - addressable_lambda:
+          name: "Indicador Nivel"
+          update_interval: 100ms
+          lambda: |-
+             it.all() = Color(0, 0, 0);
+             int pos = id(temp_val) * 2;
+             if (pos < 10) {
+               it[pos] = Color(255, 255, 255);
+               if(pos+1 < 10) it[pos+1] = Color(255, 255, 255);
+             }
+
+      - addressable_lambda:
+          name: "Sinaleiro"
+          update_interval: 1s
+          lambda: |-
+            static int fase = 0; 
+            it.all() = Color::BLACK; 
+            
+            if (fase == 0) {
+              // VERDE (3 LEDs de baixo) - Definidos um por um
+              it[0] = Color(0, 255, 0);
+              it[1] = Color(0, 255, 0);
+              it[2] = Color(0, 255, 0);
+              fase = 1;
+            } 
+            else if (fase == 1) {
+              // AMARELO (4 LEDs do meio)
+              it[3] = Color(255, 242, 2);
+              it[4] = Color(255, 242, 2);
+              it[5] = Color(255, 242, 2);
+              it[6] = Color(255, 242, 2);
+              fase = 2;
+            } 
+            else {
+              // VERMELHO (3 LEDs de cima)
+              it[7] = Color(255, 0, 0);
+              it[8] = Color(255, 0, 0);
+              it[9] = Color(255, 0, 0);
+              fase = 0;
+            }
+
+  - platform: binary
+    output: led_botao_out
+    id: luz_status_wifi
+    name: "LED Status WiFi"
+
+output:
+  - platform: esp8266_pwm
+    pin: D8
+    id: buzzer
+  - platform: gpio
+    pin: D0
+    id: led_botao_out
+
+rtttl:
+  output: buzzer
+  id: som_buzzer
+
+# ==================================================
+# SWITCH - ATIVAR ALARME (HOME ASSISTANT)
+# ==================================================
+switch:
+  - platform: template
+    name: "Alarme Escova Ativo"
+    id: ha_switch_alarme
+    icon: "mdi:alarm-check"
+    restore_mode: RESTORE_DEFAULT_OFF
+    
+    # O HA lê o estado desta variável
+    lambda: 'return id(alarme_ativo_bool);'
+    
+    # Se clicar LIGAR no HA -> Muda a variável global pra True
+    turn_on_action:
+      - lambda: 'id(alarme_ativo_bool) = true;'
+      
+    # Se clicar DESLIGAR no HA -> Muda a variável global pra False
+    turn_off_action:
+      - lambda: 'id(alarme_ativo_bool) = false;'
+
+  - platform: template
+    name: "Modo Painel HA"
+    id: sw_painel_ha
+    icon: "mdi:monitor-dashboard"
+    lambda: 'return id(ha_mode_ativo);'
+    turn_on_action:
+      - lambda: 'id(ha_mode_ativo) = true; id(ha_loop_step) = 0;'
+    turn_off_action:
+      - lambda: 'id(ha_mode_ativo) = false;'
+      - light.turn_off: led_rgb
+
+
+# ==================================================
+# SENSORES E CONTROLES
+# ==================================================
+sensor:
+  - platform: adc
+    pin: A0
+    id: sensor_ir_voltagem
+    filters:
+      - multiply: 3.3
+    update_interval: 200ms
+
+  - platform: rotary_encoder
+    id: encoder
+    pin_a: D5
+    pin_b: D6
+    on_clockwise:
+      - script.execute: acao_encoder_direita
+    on_anticlockwise:
+      - script.execute: acao_encoder_esquerda
+
+  
+  # Importa a HORA do input_datetime
+  - platform: homeassistant
+    id: ha_alarme_hora
+    entity_id: input_datetime.alarme_escova
+    attribute: hour
+    on_value:
+      then:
+        - lambda: |-
+            // Só atualiza se o ESP estiver Ocioso (não estiver no menu)
+            if (id(menu_layer) == 0) {
+              id(alarme_hh) = x;
+            }
+
+  # Importa o MINUTO do input_datetime
+  - platform: homeassistant
+    id: ha_alarme_minuto
+    entity_id: input_datetime.alarme_escova
+    attribute: minute
+    on_value:
+      then:
+        - lambda: |-
+            if (id(menu_layer) == 0) {
+              id(alarme_mm) = x;
+            }
+
+  
+  - platform: homeassistant
+    id: ha_temp_externa
+    entity_id: sensor.sensor_temperatura_externa_temperature
+    internal: true
+
+  - platform: homeassistant
+    id: ha_umid_externa
+    entity_id: sensor.sensor_temperatura_externa_humidity
+    internal: true
+
+  - platform: template
+    name: "Tempo de Escovação"
+    id: ha_tempo_escovacao
+    unit_of_measurement: "s"
+    icon: "mdi:timer-outline"
+    state_class: measurement # Permite ver gráficos e histórico no HA
+
+binary_sensor:
+  - platform: status
+    id: wifi_conectado
+
+  # BOTÃO ENCODER (Com Pressão Longa)
+  - platform: gpio
+    pin:
+      number: D7
+      mode: INPUT_PULLUP
+    id: btn_encoder
+    filters:
+      - invert:
+      - delayed_on: 10ms
+    on_click:
+      # --- CLIQUE CURTO (Rápido) ---
+      - min_length: 50ms
+        max_length: 1000ms
+        then:
+          - if:
+              # Se estiver DENTRO do menu, funciona como ENTER normal
+              condition: { lambda: 'return id(menu_layer) > 0;' }
+              then:
+                - script.execute: acao_botao_encoder
+              
+              # Se estiver FORA (Relógio), mostra o horário do alarme + luz ciano
+              else:
+                - script.execute: visualizar_alarme_temp
+
+      # --- CLIQUE LONGO (3 Segundos) ---
+      - min_length: 2000ms # Acima de 2 segundos
+        max_length: 6000ms
+        then:
+          - if:
+              # Só entra no menu se estiver OCIOSO (Layer 0)
+              condition: { lambda: 'return id(menu_layer) == 0;' }
+              then:
+                - rtttl.play: "enter:d=16,o=5,b=100:c,e,g"
+                - lambda: 'id(menu_layer) = 1;'
+
+  # BOTÃO SAIR
+  - platform: gpio
+    pin:
+      number: D3
+      mode: INPUT_PULLUP
+    id: btn_sair
+    filters:
+      - invert:
+      - delayed_on: 10ms
+    on_press:
+      - if:
+          condition:
+            lambda: 'return id(menu_layer) > 0;'
+          then:
+             - rtttl.stop
+             - lambda: |-
+                 id(menu_layer) = 0;
+                 id(menu_sub_idx) = 0;
+                 id(menu_main_idx) = 0;
+                 // Reseta também o save se sair no meio
+                 id(feedback_save_ativo) = false;
+             - rtttl.play: "cancel:d=16,o=5,b=140:c,g4"
+             - light.turn_off: led_rgb
+          else:
+             - script.execute: toggle_cronometro
+
+# Sensor IR Escova (Com Contador de Tempo)
+  - platform: template
+    name: "Presença Escova"
+    id: status_escova
+    internal: true
+    lambda: 'return id(sensor_ir_voltagem).state < 2.0;'
+    
+    # --- AO COLOCAR A ESCOVA (FIM DO USO) ---
+    on_press:
+       - light.turn_off: led_rgb
+       
+       # Lógica: Calcula o tempo e manda pro HA
+       - lambda: |-
+           // Só calcula se tiver um início registrado
+           if (id(inicio_uso_escova) > 0) {
+              int agora = millis();
+              int duracao = (agora - id(inicio_uso_escova)) / 1000;
+              
+              // Filtro: Só registra se for maior que 5 segundos (evita erros rápidos)
+              if (duracao > 5) {
+                 id(duracao_uso_escova) = duracao;
+                 // Manda para o Home Assistant
+                 id(ha_tempo_escovacao).publish_state(duracao);
+                 // Ativa o aviso no display
+                 id(mostrar_feedback_uso) = true;
+              }
+              id(inicio_uso_escova) = 0; // Reseta para a próxima
+           }
+       
+       # Mantém o tempo na tela por 3 segundos
+       - delay: 3s
+       - lambda: 'id(mostrar_feedback_uso) = false;'
+
+    # --- AO TIRAR A ESCOVA (INÍCIO DO USO) ---
+    on_release:
+       # Marca o horário de agora (em milissegundos)
+       - lambda: 'id(inicio_uso_escova) = millis();'
+       
+       - if:
+           condition: 
+             lambda: 'return id(menu_layer) == 0 && !id(cronometro_ativo);'
+           then:
+             - light.turn_on:
+                 id: led_rgb
+                 effect: "Arco Íris"
+                 brightness: !lambda 'return (id(cfg_brilho_led) * 0.25);'
+
+# ==================================================
+# SCRIPTS DE LÓGICA
+# ==================================================
+script:
+  # --- ENCODER DIREITA (++) ---
+  - id: acao_encoder_direita
+    mode: restart
+    then:
+      - if: # Navegando Menu Principal
+          condition: { lambda: 'return id(menu_layer) == 1;' }
+          then:
+            - lambda: 'if(id(menu_main_idx) < 2) id(menu_main_idx)++; else id(menu_main_idx)=0;'
+      
+      - if: # Navegando Sub Menu
+          condition: { lambda: 'return id(menu_layer) == 2;' }
+          then:
+            - lambda: |-
+                int max = 3; 
+                if (id(menu_main_idx) == 1) max = 2;
+                if (id(menu_sub_idx) < max) id(menu_sub_idx)++; else id(menu_sub_idx)=0;
+
+      - if: # Editando Valores
+          condition: { lambda: 'return id(menu_layer) == 3;' }
+          then:
+             - script.execute: incrementar_valor_editado
+
+  # --- ENCODER ESQUERDA (--) ---
+  - id: acao_encoder_esquerda
+    mode: restart
+    then:
+      - if: 
+          condition: { lambda: 'return id(menu_layer) == 1;' }
+          then:
+            - lambda: 'if(id(menu_main_idx) > 0) id(menu_main_idx)--; else id(menu_main_idx)=2;'
+      - if:
+          condition: { lambda: 'return id(menu_layer) == 2;' }
+          then:
+             - lambda: |-
+                 int max = 3;
+                 if (id(menu_main_idx) == 1) max = 2;
+                 if (id(menu_sub_idx) > 0) id(menu_sub_idx)--; else id(menu_sub_idx)=max;
+      - if:
+          condition: { lambda: 'return id(menu_layer) == 3;' }
+          then:
+             - script.execute: decrementar_valor_editado
+
+# --- BOTÃO ENTER ---
+  - id: acao_botao_encoder
+    mode: queued
+    then:
+      - rtttl.stop 
+      - rtttl.play: "bip:d=32,o=6,b=100:c"
+      
+      - if: # 0 -> 1
+          condition: { lambda: 'return id(menu_layer) == 0;' }
+          then:
+            - lambda: 'id(menu_layer) = 1;'
+          
+          else:
+            - if: # 1 -> 2
+                condition: { lambda: 'return id(menu_layer) == 1;' }
+                then:
+                  - lambda: 'id(menu_layer) = 2; id(menu_sub_idx) = 0;'
+                
+                else:
+                  - if: # 2 -> 3 (Começar Edição)
+                      condition: { lambda: 'return id(menu_layer) == 2;' }
+                      then:
+                        - script.execute: carregar_valor_para_temp
+                        - lambda: |-
+                            id(menu_layer) = 3; 
+                            id(edit_step) = 0; 
+                      
+                      else: # 3 -> Salvar
+                        - if:
+                            condition: { lambda: 'return id(menu_layer) == 3;' }
+                            then:
+                              - if:
+                                  # Se estiver na Hora (Passo 0), vai pro Minuto (Passo 1)
+                                  condition: 
+                                    lambda: 'return id(menu_main_idx) == 0 && id(menu_sub_idx) == 0 && id(edit_step) == 0;'
+                                  then:
+                                    - lambda: 'id(edit_step) = 1;'
+                                  
+                                  else:
+                                    # SALVAR TUDO
+                                    - script.execute: salvar_valor_de_temp
+                                    
+                                    # === NOVO BLOCO: ENVIAR PARA HOME ASSISTANT ===
+                                    # Verifica se o que acabamos de salvar foi o Horário do Alarme
+                                    - if:
+                                        condition:
+                                          lambda: 'return id(menu_main_idx) == 0 && id(menu_sub_idx) == 0;'
+                                        then:
+                                          - homeassistant.service:
+                                              service: input_datetime.set_datetime
+                                              data:
+                                                entity_id: input_datetime.alarme_escova
+                                              data_template:
+                                                time: !lambda |-
+                                                  char buffer[10];
+                                                  sprintf(buffer, "%02d:%02d:00", id(alarme_hh), id(alarme_mm));
+                                                  return std::string(buffer);
+                                    # ==============================================
+
+                                    - lambda: 'id(feedback_save_ativo) = true;'
+                                    - rtttl.stop
+                                    - rtttl.play: "success:d=32,o=5,b=120:c,e,g,c6"
+                                    - light.turn_off: led_rgb
+                                    - delay: 2s
+                                    - lambda: |-
+                                        id(feedback_save_ativo) = false;
+                                        id(menu_layer) = 2;
+
+  # --- CARREGAR VALORES ---
+  - id: carregar_valor_para_temp
+    then:
+      - lambda: |-
+          if (id(menu_main_idx) == 0) {
+             if (id(menu_sub_idx) == 0) { id(temp_val) = id(alarme_hh); id(temp_val_2) = id(alarme_mm); }
+             if (id(menu_sub_idx) == 1) id(temp_val) = id(alarme_ativo_bool);
+             if (id(menu_sub_idx) == 2) id(temp_val) = id(alarme_som_idx);
+             if (id(menu_sub_idx) == 3) id(temp_val) = id(alarme_efeito_idx);
+          }
+          if (id(menu_main_idx) == 1) {
+             if (id(menu_sub_idx) == 0) id(temp_val) = id(timer_preset_idx);
+             if (id(menu_sub_idx) == 1) id(temp_val) = id(timer_som_idx);
+             if (id(menu_sub_idx) == 2) id(temp_val) = id(timer_efeito_idx);
+          }
+          if (id(menu_main_idx) == 2) {
+             if (id(menu_sub_idx) == 0) id(temp_val) = id(cfg_brilho_led);
+             if (id(menu_sub_idx) == 1) id(temp_val) = id(cfg_brilho_disp);
+             if (id(menu_sub_idx) == 2) id(temp_val) = id(cfg_modo_noturno);
+          }
+
+  - id: salvar_valor_de_temp
+    then:
+      - lambda: |-
+          // ALARME
+          if (id(menu_main_idx) == 0) {
+              // 1. Salva Hora/Minuto
+              if (id(menu_sub_idx) == 0) { 
+                  id(alarme_hh) = id(temp_val); 
+                  id(alarme_mm) = id(temp_val_2); 
+              }
+              
+          // 2. Salva Ativo/Desativo (AQUI ESTÁ A MÁGICA DA SINCRONIZAÇÃO)
+          if (id(menu_sub_idx) == 1) {
+                  id(alarme_ativo_bool) = (bool)id(temp_val);
+                  // Avisa o Home Assistant que mudou!
+                  id(ha_switch_alarme).publish_state(id(alarme_ativo_bool));
+              }
+              
+          // 3. Salva Som
+          if (id(menu_sub_idx) == 2) id(alarme_som_idx) = id(temp_val);
+          if (id(menu_sub_idx) == 3) id(alarme_efeito_idx) = id(temp_val);
+            }
+            
+            // TIMER
+            else if (id(menu_main_idx) == 1) {
+              if (id(menu_sub_idx) == 0) id(timer_preset_idx) = id(temp_val);
+              if (id(menu_sub_idx) == 1) id(timer_som_idx) = id(temp_val);
+              if (id(menu_sub_idx) == 2) id(timer_efeito_idx) = id(temp_val);
+            }
+            
+            // DISPLAY
+            else if (id(menu_main_idx) == 2) {
+              if (id(menu_sub_idx) == 0) id(cfg_brilho_led) = id(temp_val);
+              if (id(menu_sub_idx) == 1) { 
+                  id(cfg_brilho_disp) = id(temp_val); 
+                  id(tm1637_display).set_intensity(id(cfg_brilho_disp)); 
+              }
+              if (id(menu_sub_idx) == 2) id(cfg_modo_noturno) = id(temp_val);
+            }
+
+  # --- INCREMENTAR (COM PRÉVIA DE SOM) ---
+  - id: incrementar_valor_editado
+    then:
+      - lambda: |-
+          // ALARME - HORA/MINUTO
+          if (id(menu_main_idx) == 0 && id(menu_sub_idx) == 0) {
+              if (id(edit_step) == 0) {
+                 id(temp_val)++; if (id(temp_val) > 23) id(temp_val) = 0;
+              } else {
+                 id(temp_val_2)++; if (id(temp_val_2) > 59) id(temp_val_2) = 0;
+              }
+          }
+          // ALARME - ATIVO
+          else if (id(menu_main_idx) == 0 && id(menu_sub_idx) == 1) {
+             id(temp_val) = !id(temp_val);
+          }
+          
+          // === PRÉVIA DE EFEITO (ADICIONE ESTE BLOCO) ===
+          else if ((id(menu_main_idx) == 0 && id(menu_sub_idx) == 3) || (id(menu_main_idx) == 1 && id(menu_sub_idx) == 2)) {
+              id(temp_val)++; if(id(temp_val) > 4) id(temp_val) = 0;
+              
+              auto call = id(led_rgb).turn_on();
+              if(id(temp_val)==0) call.set_effect("Arco Íris");
+              if(id(temp_val)==1) call.set_effect("Fogos");
+              if(id(temp_val)==2) call.set_effect("Sinaleiro");
+              if(id(temp_val)==3) call.set_effect("Cintilar");
+              if(id(temp_val)==4) call.set_effect("Strobe Verde Amarelo Vermelho");
+              call.perform();
+          }
+          
+          // === PRÉVIA DE SOM (NOVO) ===
+          else if ((id(menu_main_idx) == 0 && id(menu_sub_idx) == 2) || (id(menu_main_idx) == 1 && id(menu_sub_idx) == 1)) {
+             id(temp_val)++; if(id(temp_val) > 4) id(temp_val) = 0;
+             id(led_rgb).turn_on().set_effect("Indicador Nivel").perform();
+             
+             id(som_buzzer).stop();
+             if (id(menu_main_idx) == 0) { // Alarme
+                if(id(temp_val)==0) id(som_buzzer).play("smb:d=4,o=5,b=100:16e6,16e6,32p,8e6,16c6,8e6,8g6,8p,8g,8p,8c6,16p,8g,16p,8e,16p,8a,8b,16a#,8a,16g.,16e6,16g6,8a6,16f6,8g6,8e6,16c6,16d6,8b,16p");
+                if(id(temp_val)==1) id(som_buzzer).play("SMBTitle:d=4,o=5,b=125:8d7,8d7,8d7,8d6,8d7,8d7,8d7,8d6,2d#7,8d7,p");
+                if(id(temp_val)==2) id(som_buzzer).play("SMBTerror:d=16,o=6,b=100:c,c5,a5,a,a#5,a#,2p,8p,c,c5,a5,a,a#5,a#,2p,8p,f5,f,d5,d,d#5,d#,2p,8p,f5,f,d5,d,d#5,d#,2p");
+                if(id(temp_val)==3) id(som_buzzer).play("SMBwater:d=8,o=6,b=225:4d5,4e5,4f#5,4g5,4a5,4a#5,b5,b5,b5,p,b5,p,2b5,p,g5,2e.,2d#.,2e.,p,g5,a5,b5,c,d,2e.,2d#,4f,2e.,2p,p,g5,2d.,2c#.,2d.");
+                if(id(temp_val)==4) id(som_buzzer).play("SMBTheTheme:d=4,o=5,b=125:a,8f.,16c,16d,16f,16p,f,16d,16c,16p,16f,16p,16f,16p,8c6,8a.,g,16c,a,8f.,16c,16d,16f,16p,f,16d,16c,16p,16f,16p,16a#,16a,16g,2f");
+             }
+             else { // Timer
+                if(id(temp_val)==0) id(som_buzzer).play("smb:d=4,o=5,b=100:16e6,16e6,32p,8e6,16c6,8e6,8g6");
+                if(id(temp_val)==1) id(som_buzzer).play("star:d=4,o=6,b=160:8c6,8e6,8g6,8c7,4g6");
+                if(id(temp_val)==2) id(som_buzzer).play("coin:d=16,o=6,b=180:e,g");
+                if(id(temp_val)==3) id(som_buzzer).play("smbdeath:d=4,o=5,b=90:32c6,32c6,32c6,8p,16b,16f6,16p,16f6,16f.6,16e.6,16d6,16c6,16p,16e,16p,16c");
+                if(id(temp_val)==4) id(som_buzzer).play("1up:d=4,o=6,b=160:e,g,e7,c7,d7,g7");
+             }
+          }
+          
+          // TIMER - PRESET
+          else if (id(menu_main_idx) == 1 && id(menu_sub_idx) == 0) {
+             id(temp_val)++; if(id(temp_val) > 8) id(temp_val) = 0;
+          }
+          // LED
+          else if (id(menu_main_idx) == 2 && id(menu_sub_idx) == 0) {
+             id(temp_val)++; if(id(temp_val) > 4) id(temp_val) = 0;
+             auto call = id(led_rgb).turn_on();
+             if (id(temp_val) == 0) call.set_brightness(0.0);
+             else call.set_brightness(id(temp_val) * 0.25);
+             call.set_effect("Arco Íris");
+             call.perform();
+          }
+          // DISPLAY
+          else if (id(menu_main_idx) == 2 && id(menu_sub_idx) == 1) {
+             id(temp_val)++; if(id(temp_val) > 7) id(temp_val) = 0;
+             id(tm1637_display).set_intensity(id(temp_val));
+          }
+          // MODO NOTURNO
+          else if (id(menu_main_idx) == 2 && id(menu_sub_idx) == 2) {
+             id(temp_val)++; if(id(temp_val) > 2) id(temp_val) = 0;
+          }
+
+# --- DECREMENTAR (CORRIGIDO) ---
+  - id: decrementar_valor_editado
+    then:
+      - lambda: |-
+          // 1. ALARME - HORA/MINUTO
+          if (id(menu_main_idx) == 0 && id(menu_sub_idx) == 0) {
+              if (id(edit_step) == 0) {
+                 id(temp_val)--; if (id(temp_val) < 0) id(temp_val) = 23;
+              } else {
+                 id(temp_val_2)--; if (id(temp_val_2) < 0) id(temp_val_2) = 59;
+              }
+          }
+          
+          // 2. PRÉVIA DE EFEITO (ALARME=3, TIMER=2)
+          // Aqui corrigimos para usar -- (diminuir) em vez de ++ (aumentar)
+          else if ((id(menu_main_idx) == 0 && id(menu_sub_idx) == 3) || (id(menu_main_idx) == 1 && id(menu_sub_idx) == 2)) {
+              id(temp_val)--; 
+              if(id(temp_val) < 0) id(temp_val) = 4;
+              
+              auto call = id(led_rgb).turn_on();
+              if(id(temp_val)==0) call.set_effect("Arco Íris");
+              if(id(temp_val)==1) call.set_effect("Fogos");
+              if(id(temp_val)==2) call.set_effect("Sinaleiro");
+              if(id(temp_val)==3) call.set_effect("Cintilar");
+              if(id(temp_val)==4) call.set_effect("Strobe Verde Amarelo Vermelho");
+              call.perform();
+          }
+          
+          // 3. PRÉVIA DE SOM (ALARME=2, TIMER=1)
+          else if ((id(menu_main_idx) == 0 && id(menu_sub_idx) == 2) || (id(menu_main_idx) == 1 && id(menu_sub_idx) == 1)) {
+             id(temp_val)--; if(id(temp_val) < 0) id(temp_val) = 4;
+             
+             // Pisca luz branca simples para feedback visual
+             auto call = id(led_rgb).turn_on();
+             call.set_rgb(1.0, 1.0, 1.0);
+             call.set_brightness(0.3);
+             call.set_transition_length(0);
+             call.perform();
+             
+             id(som_buzzer).stop();
+             if (id(menu_main_idx) == 0) { // Alarme
+                if(id(temp_val)==0) id(som_buzzer).play("smb:d=4,o=5,b=100:16e6,16e6,32p");
+                if(id(temp_val)==1) id(som_buzzer).play("SMBTitle:d=4,o=5,b=125:8d7,8d7,8d7");
+                if(id(temp_val)==2) id(som_buzzer).play("SMBTerror:d=16,o=6,b=100:c,c5");
+                if(id(temp_val)==3) id(som_buzzer).play("SMBwater:d=8,o=6,b=225:4d5,4e5");
+                if(id(temp_val)==4) id(som_buzzer).play("SMBTheTheme:d=4,o=5,b=125:a,8f.");
+             }
+             else { // Timer
+                if(id(temp_val)==0) id(som_buzzer).play("smb:d=4,o=5,b=100:16e6,16e6,32p");
+                if(id(temp_val)==1) id(som_buzzer).play("star:d=4,o=6,b=160:8c6,8e6,8g6");
+                if(id(temp_val)==2) id(som_buzzer).play("coin:d=16,o=6,b=180:e,g");
+                if(id(temp_val)==3) id(som_buzzer).play("smbdeath:d=4,o=5,b=90:32c6,32c6");
+                if(id(temp_val)==4) id(som_buzzer).play("1up:d=4,o=6,b=160:e,g,e7");
+             }
+          }
+          
+          // 4. RESTANTE DOS MENUS (Brilho, Presets, etc)
+          else {
+             id(temp_val)--;
+             if (id(temp_val) < 0) {
+                if (id(menu_main_idx)==2 && id(menu_sub_idx)==1) id(temp_val) = 7; 
+                else if (id(menu_main_idx)==1 && id(menu_sub_idx)==0) id(temp_val) = 8; 
+                else id(temp_val) = 4; 
+             }
+             if (id(menu_main_idx)==2 && id(menu_sub_idx)==0) { // LED Brilho
+                auto call = id(led_rgb).turn_on();
+                if (id(temp_val) == 0) call.set_brightness(0.0);
+                else call.set_brightness(id(temp_val) * 0.25);
+                call.set_effect("Arco Íris");
+                call.perform();
+             }
+             if (id(menu_main_idx)==2 && id(menu_sub_idx)==1) { // Display Brilho
+                id(tm1637_display).set_intensity(id(temp_val));
+             }
+          }
+
+  - id: toggle_cronometro
+    then:
+      - if:
+          condition: { lambda: 'return !id(cronometro_ativo);' }
+          then:
+            - lambda: |-
+                id(cronometro_ativo) = true;
+                id(segundos_restantes) = 60 + (id(timer_preset_idx) * 30);
+            - light.turn_on:
+                id: led_rgb
+                effect: "Arco Íris"
+                brightness: !lambda 'return (id(cfg_brilho_led) * 0.25);'
+          else:
+            - lambda: 'id(cronometro_ativo) = false; id(segundos_restantes) = 0;'
+            - light.turn_off: led_rgb
+
+  - id: piscar_wifi
+    mode: restart
+    then:
+      - light.turn_on:
+          id: led_rgb
+          brightness: 100%
+          red: 100%
+          green: 100%
+          blue: 100%
+          effect: "Scan"
+      - delay: 3s
+      - while:
+          condition: { lambda: 'return !id(wifi_conectado).state;' }
+          then:
+            - light.toggle: luz_status_wifi
+            - delay: 500ms
+
+      - light.turn_off: luz_status_wifi
+      - light.turn_off: led_rgb
+
+
+  - id: executar_alarme_loop
+    mode: restart
+    then:
+      - light.turn_on: 
+          id: led_rgb
+          effect: !lambda |-
+            if(id(alarme_efeito_idx)==0) return "Arco Íris";
+            if(id(alarme_efeito_idx)==1) return "Fogos";
+            if(id(alarme_efeito_idx)==2) return "Sinaleiro";
+            if(id(alarme_efeito_idx)==3) return "Cintilar";
+            return "Strobe Verde Amarelo Vermelho";
+      
+      - while:
+          condition:
+            lambda: 'return id(status_escova).state;'
+          then:
+            - if:
+                condition: { lambda: 'return id(alarme_som_idx) == 0;' }
+                then:
+                  - rtttl.play: "smb:d=4,o=5,b=100:16e6,16e6,32p,8e6,16c6,8e6,8g6,8p,8g,8p,8c6,16p,8g,16p,8e,16p,8a,8b,16a#,8a,16g.,16e6,16g6,8a6,16f6,8g6,8e6,16c6,16d6,8b,16p,8c6,16p,8g,16p,8e,16p,8a,8b,16a#,8a,16g.,16e6,16g6,8a6,16f6,8g6,8e6,16c6,16d6,8b,8p,16g6,16f#6,16f6,16d#6,16p,16e6,16p,16g#,16a,16c6,16p,16a,16c6,16d6,8p,16g6,16f#6,16f6,16d#6,16p,16e6,16p,16c7,16p,16c7,16c7,p,16g6,16f#6,16f6,16d#6,16p,16e6,16p,16g#,16a,16c6,16p,16a,16c6,16d6,8p,16d#6,8p,16d6,8p,16c6"
+                  - delay: 1s
+            - if:
+                condition: { lambda: 'return id(alarme_som_idx) == 1;' }
+                then:
+                  - rtttl.play: "SMBTitle2:d=4,o=5,b=125:8d7,8d7,8d7,8d6,8d7,8d7,8d7,8d6,2d#7,8d7,p,32p,8d6,8b6,8b6,8b6,8d6,8b6,8b6,8b6,8d6,8b6,8b6,8b6,16b6,16c7,b6,8a6,8d6,8a6,8a6,8a6,8d6,8a6,8a6,8a6,8d6,8a6,8a6,8a6,16a6,16b6,a6,8g6,8d6,8b6,8b6,8b6,8d6,8b6,8b6,8b6,8d6,8b6,8b6,8b6,16a6,16b6,c7,e7,8d7,8d7,8d7,8d6,8c7,8c7,8c7,8f#6,2g6"
+                  - delay: 2s
+            - if:
+                condition: { lambda: 'return id(alarme_som_idx) == 2;' }
+                then:
+                  - rtttl.play: "SMBTerror:d=16,o=6,b=100:c,c5,a5,a,a#5,a#,2p,8p,c,c5,a5,a,a#5,a#,2p,8p,f5,f,d5,d,d#5,d#,2p,8p,f5,f,d5,d,d#5,d#,2p,32d#,d,32c#,c,p,d#,p,d,p,g#5,p,g5,p,c#,p,32c,f#,32f,32e,a#,32a,g#,32p,d#,b5,32p,a#5,32p,a5,g#5"
+                  - delay: 3s
+            - if:
+                condition: { lambda: 'return id(alarme_som_idx) == 3;' }
+                then:
+                  - rtttl.play: "SMBwater:d=8,o=6,b=225:4d5,4e5,4f#5,4g5,4a5,4a#5,b5,b5,b5,p,b5,p,2b5,p,g5,2e.,2d#.,2e.,p,g5,a5,b5,c,d,2e.,2d#,4f,2e.,2p,p,g5,2d.,2c#.,2d.,p,g5,a5,b5,c,c#,2d.,2g5,4f,2e.,2p,p,g5,2g.,2g.,2g.,4g,4a,p,g,2f.,2f.,2f.,4f,4g,p,f,2e.,4a5,4b5,4f,e,e,4e.,b5,2c."
+                  - delay: 2s
+            - if:
+                condition: { lambda: 'return id(alarme_som_idx) == 4;' }
+                then:
+                  - rtttl.play: "SMBMain Theme:d=4,o=5,b=125:a,8f.,16c,16d,16f,16p,f,16d,16c,16p,16f,16p,16f,16p,8c6,8a.,g,16c,a,8f.,16c,16d,16f,16p,f,16d,16c,16p,16f,16p,16a#,16a,16g,2f"
+                  - delay: 4s
+            
+            - delay: 500ms 
+
+      - rtttl.stop
+      - light.turn_off: led_rgb
+
+  # --- SCRIPT: MOSTRAR ALARME RÁPIDO (NOVO) ---
+  - id: visualizar_alarme_temp
+    mode: restart
+    then:
+      - lambda: 'id(mostrar_horario_alarme) = true;'
+# 2. Verifica se o alarme está ATIVO ou INATIVO
+      - if:
+          condition:
+            lambda: 'return id(alarme_ativo_bool);'
+          then:
+            # === SE ESTIVER ATIVO (VERDE + BIP NORMAL) ===
+            - light.turn_on:
+                id: led_rgb
+                brightness: 50%
+                red: 0%
+                green: 100%
+                blue: 0%
+                transition_length: 0s
+            - rtttl.play: "bip:d=16,o=6,b=100:c"
+          
+          else:
+            # === SE ESTIVER DESATIVADO (VERMELHO + SOM CANCELA) ===
+            - light.turn_on:
+                id: led_rgb
+                brightness: 50%
+                red: 100%
+                green: 0%
+                blue: 0%
+                transition_length: 0s
+            # Som de cancelamento (o mesmo do botão sair)
+            - rtttl.play: "cancel:d=16,o=5,b=140:c,g4"
+
+      - delay: 2s
+      
+      - lambda: 'id(mostrar_horario_alarme) = false;'
+      - light.turn_off: led_rgb
+
+# ==================================================
+# INTERVALO DE TEMPO
+# ==================================================
+interval:
+  - interval: 1s
+    then:
+      # Lógica do Cronômetro
+      - if:
+          condition: { lambda: 'return id(cronometro_ativo) && id(segundos_restantes) > 0;' }
+          then:
+            - lambda: 'id(segundos_restantes)--;'
+            
+            # --- APITO DINÂMICO (CORREÇÃO DO BUG) ---
+            - if:
+                condition: 
+                  lambda: |-
+                    return (id(segundos_restantes) > 0 && id(segundos_restantes) % 30 == 0);
+                then:
+                  - rtttl.play: "bip:d=16,o=6,b=100:c"
+
+      - if: # FIM DO CRONOMETRO
+          condition: { lambda: 'return id(cronometro_ativo) && id(segundos_restantes) == 0;' }
+          then:
+             - lambda: 'id(cronometro_ativo) = false; id(fim_cronometro) = true;'
+             - light.turn_on: 
+                 id: led_rgb
+                 effect: !lambda |-
+                   if(id(timer_efeito_idx)==0) return "Arco Íris";
+                   if(id(timer_efeito_idx)==1) return "Fogos";
+                   if(id(timer_efeito_idx)==2) return "Sinaleiro";
+                   if(id(timer_efeito_idx)==3) return "Cintilar";
+                   return "Strobe Verde Amarelo Vermelho";
+             
+             # SELEÇÃO DE MÚSICA DO TIMER
+             - if:
+                 condition: { lambda: 'return id(timer_som_idx) == 0;' }
+                 then:
+                   - rtttl.play: "smb:d=4,o=5,b=100:16e6,16e6,32p,8e6,16c6,8e6,8g6"
+             - if:
+                 condition: { lambda: 'return id(timer_som_idx) == 1;' }
+                 then:
+                   - rtttl.play: "star:d=4,o=6,b=160:8c6,8e6,8g6,8c7,4g6"
+             - if:
+                 condition: { lambda: 'return id(timer_som_idx) == 2;' }
+                 then:
+                   - rtttl.play: "coin:d=16,o=6,b=180:e,g"
+             - if:
+                 condition: { lambda: 'return id(timer_som_idx) == 3;' }
+                 then:
+                   - rtttl.play: "smbdeath:d=4,o=5,b=90:32c6,32c6,32c6,8p,16b,16f6,16p,16f6,16f.6,16e.6,16d6,16c6,16p,16e,16p,16c"
+             - if:
+                 condition: { lambda: 'return id(timer_som_idx) == 4;' }
+                 then:
+                   - rtttl.play: "1up:d=4,o=6,b=160:e,g,e7,c7,d7,g7"
+
+             - delay: 4s
+             - lambda: 'id(fim_cronometro) = false;'
+             - light.turn_off: led_rgb
+
+      # Lógica do Alarme (CORRETA)
+      - if:
+          condition:
+            lambda: |-
+              auto now = id(hora_atual).now();
+              return id(alarme_ativo_bool) && now.is_valid() && 
+                     now.hour == id(alarme_hh) && now.minute == id(alarme_mm) && 
+                     now.second == 0;
+          then:
+             # CHAMA O SCRIPT DE LOOP QUE ESTAVA FALTANDO
+             - script.execute: executar_alarme_loop
+
+
+  - interval: 1s
+    then:
+      - if:
+          condition: 
+            lambda: 'return id(ha_mode_ativo);'
+          then:
+            - lambda: |-
+                static int contador = 0;
+                contador++;
+                
+                // Passo 0: Mostra "-HA-" (Dura 2 segundos)
+                if (id(ha_loop_step) == 0) {
+                   if (contador >= 2) { 
+                      id(ha_loop_step) = 1; 
+                      contador = 0; 
+                   }
+                }
+                // Passo 1: Temperatura (Dura 3 segundos)
+                else if (id(ha_loop_step) == 1) {
+                   if (contador >= 7) { 
+                      id(ha_loop_step) = 2; 
+                      contador = 0; 
+                   }
+                }
+                // Passo 2: Umidade (Dura 3 segundos)
+                else if (id(ha_loop_step) == 2) {
+                   if (contador >= 7) { 
+                      id(ha_loop_step) = 0; // Volta pro começo
+                      contador = 0; 
+                   }
+                }
+            
+            # --- ATUALIZA A LUZ CONFORME O PASSO ---
+            - if:
+                condition: { lambda: 'return id(ha_loop_step) == 0;' } # -HA-
+                then:
+                  - light.turn_on: { id: led_rgb, brightness: 50%, red: 0%, green: 100%, blue: 100% } # Ciano
+            - if:
+                condition: { lambda: 'return id(ha_loop_step) == 1;' } # Temperatura
+                then:
+                  - light.turn_on: { id: led_rgb, brightness: 50%, red: 100%, green: 0%, blue: 0% } # Vermelho
+            - if:
+                condition: { lambda: 'return id(ha_loop_step) == 2;' } # Umidade
+                then:
+                  - light.turn_on: { id: led_rgb, brightness: 50%, red: 0%, green: 0%, blue: 100% } # Azul
+
+# ==================================================
+# BOTÕES PARA HOME ASSISTANT
+# ==================================================
+button:
+  - platform: template
+    name: "Iniciar Timer"
+    icon: "mdi:timer-play"
+    on_press:
+      - script.execute: toggle_cronometro
+
+# ==================================================
+# SENSOR DE TEXTO (SIM / NÃO)
+# ==================================================
+
+text_sensor:
+  - platform: template
+    name: "Presença da Escova"
+    icon: "mdi:toothbrush"
+    lambda: |-
+      if (id(status_escova).state) {
+        return {"Sim"};
+      } else {
+        return {"Não"};
+      }
+    update_interval: 200ms
+
+  - platform: wifi_info
+    ssid:
+      name: "WiFi Conectado"
+    bssid:
+      name: "MAC do Roteador"
+    ip_address:
+      name: "IP do ESP"
